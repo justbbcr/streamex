@@ -1,11 +1,29 @@
 // ============================================================
 // StreameX Module for Sora — French (VF/VOSTFR)
-// Uses TMDB API for metadata + multiple embed providers
+// Uses TMDB API for metadata + vidsrc.xyz embed provider
 // ============================================================
 
 const TMDB_API_KEY = "f3d757824f08ea2cff45eb8f47ca3a1e";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
+
+// Blacklist domains known to serve ads or decoy videos
+const AD_DOMAINS = [
+    "raw.githubusercontent.com",
+    "test-videos.co.uk",
+    "github.com",
+    "googleadservices",
+    "doubleclick.net",
+    "googlesyndication",
+    "adservice",
+    "bunny.net/test",
+    "sample-videos"
+];
+
+function isAdUrl(url) {
+    const lower = url.toLowerCase();
+    return AD_DOMAINS.some(domain => lower.includes(domain));
+}
 
 // ─── Search ──────────────────────────────────────────────────
 async function searchResults(keyword) {
@@ -120,11 +138,94 @@ async function extractEpisodes(url) {
     }
 }
 
+// ─── Helper: Extract valid stream URLs from HTML ─────────────
+function extractStreamsFromHtml(html, title, referer) {
+    let found = [];
+    
+    // Match m3u8 URLs
+    const m3u8Matches = html.match(/https?:\/\/[^\s'"\\]+\.m3u8[^\s'"\\]*/g);
+    if (m3u8Matches) {
+        for (const url of m3u8Matches) {
+            if (!isAdUrl(url)) {
+                found.push({
+                    title: title,
+                    streamUrl: url,
+                    headers: {
+                        "Referer": referer,
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                    }
+                });
+            }
+        }
+    }
+
+    // Match mp4 URLs
+    const mp4Matches = html.match(/https?:\/\/[^\s'"\\]+\.mp4[^\s'"\\]*/g);
+    if (mp4Matches) {
+        for (const url of mp4Matches) {
+            if (!isAdUrl(url)) {
+                found.push({
+                    title: title + " MP4",
+                    streamUrl: url,
+                    headers: {
+                        "Referer": referer,
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                    }
+                });
+            }
+        }
+    }
+
+    return found;
+}
+
+// ─── Helper: Follow iframes and extract streams ──────────────
+async function followIframesAndExtract(html, title, referer, depth) {
+    let streams = [];
+    if (depth <= 0) return streams;
+
+    // First try to find direct streams
+    streams = streams.concat(extractStreamsFromHtml(html, title, referer));
+
+    // Then find and follow iframes
+    const iframeSrcMatches = html.match(/src=["'](https?:\/\/[^"']+)["']/g);
+    if (iframeSrcMatches) {
+        for (const match of iframeSrcMatches) {
+            const srcMatch = match.match(/src=["'](https?:\/\/[^"']+)["']/);
+            if (srcMatch && srcMatch[1]) {
+                const iframeSrc = srcMatch[1];
+                
+                // Skip ad/tracking iframes
+                if (isAdUrl(iframeSrc)) continue;
+                // Skip CSS/JS/image resources
+                if (iframeSrc.match(/\.(css|js|png|jpg|gif|svg|ico|woff)$/i)) continue;
+
+                try {
+                    const iframeResponse = await soraFetch(iframeSrc, {
+                        headers: {
+                            "Referer": referer,
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                        }
+                    });
+                    if (iframeResponse) {
+                        const iframeHtml = await iframeResponse.text();
+                        const iframeStreams = await followIframesAndExtract(iframeHtml, title, iframeSrc, depth - 1);
+                        streams = streams.concat(iframeStreams);
+                    }
+                } catch (e) {
+                    console.log("Iframe follow error: " + e);
+                }
+            }
+        }
+    }
+
+    return streams;
+}
+
 // ─── Stream URL ──────────────────────────────────────────────
 async function extractStreamUrl(url) {
     try {
         let streams = [];
-        let subtitlesList = [];
 
         const parts = url.split("/");
         const type = parts[0]; // "movie" or "tv"
@@ -132,244 +233,101 @@ async function extractStreamUrl(url) {
         const season = parts[2];
         const episode = parts[3];
 
-        // ── Provider 1: Videasy (good quality, often works) ──
+        // ── Provider 1: vidsrc.xyz (follows iframes deep) ──
         try {
-            let videasyUrl = "";
+            let embedUrl = "";
             if (type === "movie") {
-                videasyUrl = `https://player.videasy.net/movie/${id}`;
+                embedUrl = `https://vidsrc.xyz/embed/movie/${id}`;
             } else {
-                videasyUrl = `https://player.videasy.net/tv/${id}/${season}/${episode}`;
+                embedUrl = `https://vidsrc.xyz/embed/tv/${id}/${season}/${episode}`;
             }
 
-            const videasyResponse = await soraFetch(videasyUrl, {
+            const response = await soraFetch(embedUrl, {
                 headers: {
                     "Referer": "https://www.streamex.net/",
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
                 }
             });
-            const videasyHtml = await videasyResponse.text();
-
-            // Look for m3u8 URLs
-            const m3u8Matches = videasyHtml.match(/https?:\/\/[^\s'"\\]+\.m3u8[^\s'"\\]*/g);
-            if (m3u8Matches) {
-                for (const m3u8 of m3u8Matches) {
-                    streams.push({
-                        title: "Videasy",
-                        streamUrl: m3u8,
-                        headers: {
-                            "Referer": "https://player.videasy.net/",
-                            "Origin": "https://player.videasy.net",
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
-            }
-
-            // Look for mp4 URLs
-            const mp4Matches = videasyHtml.match(/https?:\/\/[^\s'"\\]+\.mp4[^\s'"\\]*/g);
-            if (mp4Matches) {
-                for (const mp4 of mp4Matches) {
-                    streams.push({
-                        title: "Videasy MP4",
-                        streamUrl: mp4,
-                        headers: {
-                            "Referer": "https://player.videasy.net/",
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
+            if (response) {
+                const html = await response.text();
+                const found = await followIframesAndExtract(html, "VidSrc", embedUrl, 3);
+                streams = streams.concat(found);
             }
         } catch (e) {
-            console.log("Videasy error: " + e);
+            console.log("vidsrc.xyz error: " + e);
         }
 
-        // ── Provider 2: VidSrc.cc ──
+        // ── Provider 2: multiembed.mov ──
         try {
-            let vidsrcUrl = "";
+            let embedUrl = "";
             if (type === "movie") {
-                vidsrcUrl = `https://vidsrc.cc/v2/embed/movie/${id}`;
+                embedUrl = `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`;
             } else {
-                vidsrcUrl = `https://vidsrc.cc/v2/embed/tv/${id}/${season}/${episode}`;
+                embedUrl = `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${season}&e=${episode}`;
             }
 
-            const vidsrcResponse = await soraFetch(vidsrcUrl, {
+            const response = await soraFetch(embedUrl, {
                 headers: {
                     "Referer": "https://www.streamex.net/",
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
                 }
             });
-            const vidsrcHtml = await vidsrcResponse.text();
-
-            // Extract iframe src to follow the chain
-            const iframeMatch = vidsrcHtml.match(/src=["'](https?:\/\/[^"']+)["']/g);
-            if (iframeMatch) {
-                for (const iframeSrc of iframeMatch) {
-                    const srcUrl = iframeSrc.match(/src=["'](https?:\/\/[^"']+)["']/);
-                    if (srcUrl && srcUrl[1]) {
-                        try {
-                            const iframeResponse = await soraFetch(srcUrl[1], {
-                                headers: {
-                                    "Referer": "https://vidsrc.cc/",
-                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                                }
-                            });
-                            const iframeHtml = await iframeResponse.text();
-
-                            const streamMatches = iframeHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
-                            if (streamMatches) {
-                                for (const streamUrl of streamMatches) {
-                                    streams.push({
-                                        title: "VidSrc",
-                                        streamUrl: streamUrl,
-                                        headers: {
-                                            "Referer": srcUrl[1],
-                                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                                        }
-                                    });
-                                }
-                            }
-                        } catch (iframeError) {
-                            console.log("iframe fetch error: " + iframeError);
-                        }
-                    }
-                }
+            if (response) {
+                const html = await response.text();
+                const found = await followIframesAndExtract(html, "MultiEmbed", embedUrl, 3);
+                streams = streams.concat(found);
             }
         } catch (e) {
-            console.log("VidSrc error: " + e);
+            console.log("multiembed error: " + e);
         }
 
         // ── Provider 3: autoembed.cc ──
         try {
-            let autoembedUrl = "";
+            let embedUrl = "";
             if (type === "movie") {
-                autoembedUrl = `https://player.autoembed.cc/embed/movie/${id}`;
+                embedUrl = `https://player.autoembed.cc/embed/movie/${id}`;
             } else {
-                autoembedUrl = `https://player.autoembed.cc/embed/tv/${id}/${season}/${episode}`;
+                embedUrl = `https://player.autoembed.cc/embed/tv/${id}/${season}/${episode}`;
             }
 
-            const autoResponse = await soraFetch(autoembedUrl, {
+            const response = await soraFetch(embedUrl, {
                 headers: {
                     "Referer": "https://www.streamex.net/",
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
                 }
             });
-            const autoHtml = await autoResponse.text();
-
-            const streamMatches = autoHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
-            if (streamMatches) {
-                for (const streamUrl of streamMatches) {
-                    streams.push({
-                        title: "AutoEmbed",
-                        streamUrl: streamUrl,
-                        headers: {
-                            "Referer": "https://player.autoembed.cc/",
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
+            if (response) {
+                const html = await response.text();
+                const found = await followIframesAndExtract(html, "AutoEmbed", embedUrl, 3);
+                streams = streams.concat(found);
             }
         } catch (e) {
-            console.log("AutoEmbed error: " + e);
+            console.log("autoembed error: " + e);
         }
 
-        // ── Provider 4: multiembed ──
+        // ── Provider 4: Frembed FR ──
         try {
-            let multiUrl = "";
+            let embedUrl = "";
             if (type === "movie") {
-                multiUrl = `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`;
+                embedUrl = `https://frembed.buzz/api/film.php?id=${id}`;
             } else {
-                multiUrl = `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${season}&e=${episode}`;
+                embedUrl = `https://frembed.buzz/api/serie.php?id=${id}&sa=${season}&epi=${episode}`;
             }
 
-            const multiResponse = await soraFetch(multiUrl, {
-                headers: {
-                    "Referer": "https://www.streamex.net/",
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                }
-            });
-            const multiHtml = await multiResponse.text();
-
-            const streamMatches = multiHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
-            if (streamMatches) {
-                for (const streamUrl of streamMatches) {
-                    streams.push({
-                        title: "MultiEmbed",
-                        streamUrl: streamUrl,
-                        headers: {
-                            "Referer": "https://multiembed.mov/",
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
-            }
-        } catch (e) {
-            console.log("MultiEmbed error: " + e);
-        }
-
-        // ── Provider 5: Frembed (French VF/VOSTFR) ──
-        try {
-            let frembedUrl = "";
-            if (type === "movie") {
-                frembedUrl = `https://frembed.buzz/api/film.php?id=${id}`;
-            } else {
-                frembedUrl = `https://frembed.buzz/api/serie.php?id=${id}&sa=${season}&epi=${episode}`;
-            }
-
-            const frembedResponse = await soraFetch(frembedUrl, {
+            const response = await soraFetch(embedUrl, {
                 headers: {
                     "Referer": "https://www.streamex.net/",
                     "Origin": "https://www.streamex.net",
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
                 }
             });
-            const frembedHtml = await frembedResponse.text();
-
-            // Try to find stream URLs in the page
-            const streamMatches = frembedHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
-            if (streamMatches) {
-                for (const streamUrl of streamMatches) {
-                    streams.push({
-                        title: "Frembed FR",
-                        streamUrl: streamUrl,
-                        headers: {
-                            "Referer": "https://frembed.work/",
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
-            }
-
-            // Also try to find iframe sources and follow them
-            const iframeMatch = frembedHtml.match(/src=["'](https?:\/\/[^"']+)["']/);
-            if (iframeMatch && iframeMatch[1]) {
-                try {
-                    const iframeResponse = await soraFetch(iframeMatch[1], {
-                        headers: {
-                            "Referer": "https://frembed.work/",
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                    const iframeHtml = await iframeResponse.text();
-
-                    const iframeStreamMatches = iframeHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
-                    if (iframeStreamMatches) {
-                        for (const streamUrl of iframeStreamMatches) {
-                            streams.push({
-                                title: "Frembed FR",
-                                streamUrl: streamUrl,
-                                headers: {
-                                    "Referer": iframeMatch[1],
-                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                                }
-                            });
-                        }
-                    }
-                } catch (iframeError) {
-                    console.log("Frembed iframe error: " + iframeError);
-                }
+            if (response) {
+                const html = await response.text();
+                const found = await followIframesAndExtract(html, "Frembed FR", embedUrl, 3);
+                streams = streams.concat(found);
             }
         } catch (e) {
-            console.log("Frembed error: " + e);
+            console.log("frembed error: " + e);
         }
 
         const results = {
