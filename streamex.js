@@ -1,11 +1,11 @@
 // ============================================================
-// StreameX Module for Sora — French (VF/VOSTFR) via Frembed
+// StreameX Module for Sora — French (VF/VOSTFR)
+// Uses TMDB API for metadata + multiple embed providers
 // ============================================================
 
 const TMDB_API_KEY = "f3d757824f08ea2cff45eb8f47ca3a1e";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_IMG = "https://image.tmdb.org/t/p/w500";
-const FREMBED_BASE = "https://frembed.work";
 
 // ─── Search ──────────────────────────────────────────────────
 async function searchResults(keyword) {
@@ -20,7 +20,7 @@ async function searchResults(keyword) {
             .map(item => {
                 const title = item.title || item.name || "Sans titre";
                 const image = item.poster_path ? `${TMDB_IMG}${item.poster_path}` : "";
-                const type = item.media_type; // "movie" or "tv"
+                const type = item.media_type;
                 return {
                     title,
                     image,
@@ -39,7 +39,7 @@ async function searchResults(keyword) {
 async function extractDetails(url) {
     try {
         const parts = url.split("/");
-        const type = parts[0]; // "movie" or "tv"
+        const type = parts[0];
         const id = parts[1];
 
         const apiUrl = `${TMDB_BASE}/${type}/${id}?api_key=${TMDB_API_KEY}&language=fr-FR`;
@@ -87,18 +87,16 @@ async function extractEpisodes(url) {
             ]);
         }
 
-        // TV Show — fetch show details first to get season count
         const showUrl = `${TMDB_BASE}/tv/${id}?api_key=${TMDB_API_KEY}&language=fr-FR`;
         const showResponse = await soraFetch(showUrl);
         const showData = await showResponse.json();
 
         let allEpisodes = [];
-
         const seasons = showData.seasons || [];
 
         for (const season of seasons) {
             const seasonNumber = season.season_number;
-            if (seasonNumber === 0) continue; // Skip specials
+            if (seasonNumber === 0) continue;
 
             const seasonUrl = `${TMDB_BASE}/tv/${id}/season/${seasonNumber}?api_key=${TMDB_API_KEY}&language=fr-FR`;
             const seasonResponse = await soraFetch(seasonUrl);
@@ -126,140 +124,268 @@ async function extractEpisodes(url) {
 async function extractStreamUrl(url) {
     try {
         let streams = [];
-        let subtitles = "";
+        let subtitlesList = [];
 
         const parts = url.split("/");
         const type = parts[0]; // "movie" or "tv"
         const id = parts[1];
+        const season = parts[2];
+        const episode = parts[3];
 
-        // Build Frembed API URLs for each available server
-        const servers = ["link1", "link3", "link7"];
-        const serverNames = {
-            "link1": "Dood (FR)",
-            "link3": "VOE (FR)",
-            "link7": "Uqload (FR)"
-        };
+        // ── Provider 1: Videasy (good quality, often works) ──
+        try {
+            let videasyUrl = "";
+            if (type === "movie") {
+                videasyUrl = `https://player.videasy.net/movie/${id}`;
+            } else {
+                videasyUrl = `https://player.videasy.net/tv/${id}/${season}/${episode}`;
+            }
 
-        for (const server of servers) {
-            try {
-                let frembedUrl = "";
-
-                if (type === "movie") {
-                    frembedUrl = `${FREMBED_BASE}/api/stream?type=movie&tmdb=${id}&server=${server}`;
-                } else {
-                    const seasonNumber = parts[2];
-                    const episodeNumber = parts[3];
-                    frembedUrl = `${FREMBED_BASE}/api/stream?type=serie&tmdb=${id}&sa=${seasonNumber}&epi=${episodeNumber}&server=${server}`;
+            const videasyResponse = await soraFetch(videasyUrl, {
+                headers: {
+                    "Referer": "https://www.streamex.net/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
                 }
+            });
+            const videasyHtml = await videasyResponse.text();
 
-                // Fetch the Frembed redirect to get the actual host URL
-                const hostResponse = await soraFetch(frembedUrl);
-                const hostHtml = await hostResponse.text();
-
-                // Try to extract video URL from the host page
-                let streamUrl = "";
-
-                // Method 1: Direct .mp4 URL in source (works for Uqload)
-                const mp4Match = hostHtml.match(/https?:\/\/[^\s'"]+\.mp4[^\s'"]*/);
-                if (mp4Match) {
-                    streamUrl = mp4Match[0];
-                }
-
-                // Method 2: .m3u8 URL in source
-                if (!streamUrl) {
-                    const m3u8Match = hostHtml.match(/https?:\/\/[^\s'"]+\.m3u8[^\s'"]*/);
-                    if (m3u8Match) {
-                        streamUrl = m3u8Match[0];
-                    }
-                }
-
-                // Method 3: Look for "file" or "source" JS variable
-                if (!streamUrl) {
-                    const fileMatch = hostHtml.match(/(?:file|source)\s*[:=]\s*["'](https?:\/\/[^"']+)/);
-                    if (fileMatch) {
-                        streamUrl = fileMatch[1];
-                    }
-                }
-
-                if (streamUrl) {
+            // Look for m3u8 URLs
+            const m3u8Matches = videasyHtml.match(/https?:\/\/[^\s'"\\]+\.m3u8[^\s'"\\]*/g);
+            if (m3u8Matches) {
+                for (const m3u8 of m3u8Matches) {
                     streams.push({
-                        title: serverNames[server] || server,
-                        streamUrl,
+                        title: "Videasy",
+                        streamUrl: m3u8,
                         headers: {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15",
-                            "Referer": "https://frembed.work/"
+                            "Referer": "https://player.videasy.net/",
+                            "Origin": "https://player.videasy.net",
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
                         }
                     });
                 }
-            } catch (serverError) {
-                console.log(`Error fetching server ${server}: ${serverError}`);
-                // Continue to next server
             }
+
+            // Look for mp4 URLs
+            const mp4Matches = videasyHtml.match(/https?:\/\/[^\s'"\\]+\.mp4[^\s'"\\]*/g);
+            if (mp4Matches) {
+                for (const mp4 of mp4Matches) {
+                    streams.push({
+                        title: "Videasy MP4",
+                        streamUrl: mp4,
+                        headers: {
+                            "Referer": "https://player.videasy.net/",
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log("Videasy error: " + e);
         }
 
-        // If no streams found from Frembed, try direct StreameX embed (wplay fallback)
-        if (streams.length === 0) {
-            try {
-                let embedUrl = "";
-                if (type === "movie") {
-                    embedUrl = `https://embed.wplay.me/embed/movie/${id}`;
-                } else {
-                    const seasonNumber = parts[2];
-                    const episodeNumber = parts[3];
-                    embedUrl = `https://embed.wplay.me/embed/tv/${id}/${seasonNumber}/${episodeNumber}`;
-                }
-
-                const embedResponse = await soraFetch(embedUrl);
-                const embedHtml = await embedResponse.text();
-
-                // Try to extract stream from wplay embed
-                const mp4Match = embedHtml.match(/https?:\/\/[^\s'"]+\.mp4[^\s'"]*/);
-                if (mp4Match) {
-                    streams.push({
-                        title: "StreameX (Fallback)",
-                        streamUrl: mp4Match[0],
-                        headers: {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
-
-                const m3u8Match = embedHtml.match(/https?:\/\/[^\s'"]+\.m3u8[^\s'"]*/);
-                if (m3u8Match) {
-                    streams.push({
-                        title: "StreameX HLS (Fallback)",
-                        streamUrl: m3u8Match[0],
-                        headers: {
-                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
-                        }
-                    });
-                }
-            } catch (fallbackError) {
-                console.log("Fallback error: " + fallbackError);
+        // ── Provider 2: VidSrc.cc ──
+        try {
+            let vidsrcUrl = "";
+            if (type === "movie") {
+                vidsrcUrl = `https://vidsrc.cc/v2/embed/movie/${id}`;
+            } else {
+                vidsrcUrl = `https://vidsrc.cc/v2/embed/tv/${id}/${season}/${episode}`;
             }
+
+            const vidsrcResponse = await soraFetch(vidsrcUrl, {
+                headers: {
+                    "Referer": "https://www.streamex.net/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                }
+            });
+            const vidsrcHtml = await vidsrcResponse.text();
+
+            // Extract iframe src to follow the chain
+            const iframeMatch = vidsrcHtml.match(/src=["'](https?:\/\/[^"']+)["']/g);
+            if (iframeMatch) {
+                for (const iframeSrc of iframeMatch) {
+                    const srcUrl = iframeSrc.match(/src=["'](https?:\/\/[^"']+)["']/);
+                    if (srcUrl && srcUrl[1]) {
+                        try {
+                            const iframeResponse = await soraFetch(srcUrl[1], {
+                                headers: {
+                                    "Referer": "https://vidsrc.cc/",
+                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                                }
+                            });
+                            const iframeHtml = await iframeResponse.text();
+
+                            const streamMatches = iframeHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
+                            if (streamMatches) {
+                                for (const streamUrl of streamMatches) {
+                                    streams.push({
+                                        title: "VidSrc",
+                                        streamUrl: streamUrl,
+                                        headers: {
+                                            "Referer": srcUrl[1],
+                                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                                        }
+                                    });
+                                }
+                            }
+                        } catch (iframeError) {
+                            console.log("iframe fetch error: " + iframeError);
+                        }
+                    }
+                }
+            }
+        } catch (e) {
+            console.log("VidSrc error: " + e);
+        }
+
+        // ── Provider 3: autoembed.cc ──
+        try {
+            let autoembedUrl = "";
+            if (type === "movie") {
+                autoembedUrl = `https://player.autoembed.cc/embed/movie/${id}`;
+            } else {
+                autoembedUrl = `https://player.autoembed.cc/embed/tv/${id}/${season}/${episode}`;
+            }
+
+            const autoResponse = await soraFetch(autoembedUrl, {
+                headers: {
+                    "Referer": "https://www.streamex.net/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                }
+            });
+            const autoHtml = await autoResponse.text();
+
+            const streamMatches = autoHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
+            if (streamMatches) {
+                for (const streamUrl of streamMatches) {
+                    streams.push({
+                        title: "AutoEmbed",
+                        streamUrl: streamUrl,
+                        headers: {
+                            "Referer": "https://player.autoembed.cc/",
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log("AutoEmbed error: " + e);
+        }
+
+        // ── Provider 4: multiembed ──
+        try {
+            let multiUrl = "";
+            if (type === "movie") {
+                multiUrl = `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1`;
+            } else {
+                multiUrl = `https://multiembed.mov/directstream.php?video_id=${id}&tmdb=1&s=${season}&e=${episode}`;
+            }
+
+            const multiResponse = await soraFetch(multiUrl, {
+                headers: {
+                    "Referer": "https://www.streamex.net/",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                }
+            });
+            const multiHtml = await multiResponse.text();
+
+            const streamMatches = multiHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
+            if (streamMatches) {
+                for (const streamUrl of streamMatches) {
+                    streams.push({
+                        title: "MultiEmbed",
+                        streamUrl: streamUrl,
+                        headers: {
+                            "Referer": "https://multiembed.mov/",
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                        }
+                    });
+                }
+            }
+        } catch (e) {
+            console.log("MultiEmbed error: " + e);
+        }
+
+        // ── Provider 5: Frembed (French VF/VOSTFR) ──
+        try {
+            let frembedUrl = "";
+            if (type === "movie") {
+                frembedUrl = `https://frembed.buzz/api/film.php?id=${id}`;
+            } else {
+                frembedUrl = `https://frembed.buzz/api/serie.php?id=${id}&sa=${season}&epi=${episode}`;
+            }
+
+            const frembedResponse = await soraFetch(frembedUrl, {
+                headers: {
+                    "Referer": "https://www.streamex.net/",
+                    "Origin": "https://www.streamex.net",
+                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                }
+            });
+            const frembedHtml = await frembedResponse.text();
+
+            // Try to find stream URLs in the page
+            const streamMatches = frembedHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
+            if (streamMatches) {
+                for (const streamUrl of streamMatches) {
+                    streams.push({
+                        title: "Frembed FR",
+                        streamUrl: streamUrl,
+                        headers: {
+                            "Referer": "https://frembed.work/",
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                        }
+                    });
+                }
+            }
+
+            // Also try to find iframe sources and follow them
+            const iframeMatch = frembedHtml.match(/src=["'](https?:\/\/[^"']+)["']/);
+            if (iframeMatch && iframeMatch[1]) {
+                try {
+                    const iframeResponse = await soraFetch(iframeMatch[1], {
+                        headers: {
+                            "Referer": "https://frembed.work/",
+                            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                        }
+                    });
+                    const iframeHtml = await iframeResponse.text();
+
+                    const iframeStreamMatches = iframeHtml.match(/https?:\/\/[^\s'"\\]+\.(m3u8|mp4)[^\s'"\\]*/g);
+                    if (iframeStreamMatches) {
+                        for (const streamUrl of iframeStreamMatches) {
+                            streams.push({
+                                title: "Frembed FR",
+                                streamUrl: streamUrl,
+                                headers: {
+                                    "Referer": iframeMatch[1],
+                                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.1 Safari/605.1.15"
+                                }
+                            });
+                        }
+                    }
+                } catch (iframeError) {
+                    console.log("Frembed iframe error: " + iframeError);
+                }
+            }
+        } catch (e) {
+            console.log("Frembed error: " + e);
         }
 
         const results = {
             streams,
-            subtitles
+            subtitles: ""
         };
 
         console.log(JSON.stringify(results));
         return JSON.stringify(results);
     } catch (error) {
         console.log("Fetch error in extractStreamUrl: " + error);
-
-        const result = {
-            streams: [],
-            subtitles: ""
-        };
-
-        console.log(JSON.stringify(result));
-        return JSON.stringify(result);
+        return JSON.stringify({ streams: [], subtitles: "" });
     }
 }
 
-// ─── Sora Fetch Wrapper (fetchv2 with fallback) ─────────────
+// ─── Sora Fetch Wrapper ─────────────────────────────────────
 async function soraFetch(url, options = { headers: {}, method: "GET", body: null, encoding: "utf-8" }) {
     try {
         return await fetchv2(
